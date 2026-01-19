@@ -6,17 +6,6 @@
 [![Node.js](https://img.shields.io/badge/Node.js-18+-green.svg)](https://nodejs.org/)
 [![Next.js](https://img.shields.io/badge/Next.js-14-black.svg)](https://nextjs.org/)
 
-## ⚡ Quick Start (One Command)
-
-```bash
-npm install
-npm run dev:all
-```
-
-Open **http://localhost:3000** and start streaming!
-
-👉 See [QUICKSTART.md](QUICKSTART.md) for detailed setup guide.
-
 ## Features
 
 ✓ **Netflix-Style Player** - Exact replica of Netflix's web player UI
@@ -45,66 +34,6 @@ Open **http://localhost:3000** and start streaming!
 - **Transcoding**: FFmpeg (for audio conversion)
 - **Proxy**: Nginx (optional, for production)
 - **Security**: JWT tokens, no-download protection
-
-## Quick Start
-
-### Prerequisites
-
-- Node.js 18+ installed
-- FFmpeg installed (for audio transcoding)
-
-**Install FFmpeg:**
-```bash
-# macOS
-brew install ffmpeg
-
-# Ubuntu/Debian
-sudo apt install ffmpeg
-
-# Windows (Chocolatey)
-choco install ffmpeg
-```
-
-See [INSTALL_FFMPEG.md](INSTALL_FFMPEG.md) for detailed instructions.
-
-### 1. Install Dependencies
-
-```bash
-npm install
-```
-
-### 2. Start Both Servers (One Command)
-
-```bash
-npm run dev:all
-```
-
-Or use the start script:
-```bash
-./start.sh
-```
-
-This will start:
-- Backend server on http://localhost:3001
-- Frontend on http://localhost:3000
-
-### 3. Alternative: Start Servers Separately
-
-```bash
-# Terminal 1 - Backend
-npm run server
-
-# Terminal 2 - Frontend
-npm run dev
-```
-
-### 4. Use the Platform
-
-1. Open http://localhost:3000
-2. Paste a direct media URL (MP4, MKV, WEBM, MP3)
-3. Enable "Audio Transcoding" for MKV files with incompatible audio
-4. Click "Start Streaming"
-5. Enjoy instant playback with sound!
 
 ## Audio Transcoding
 
@@ -147,27 +76,7 @@ Enable the "Audio Transcoding" checkbox when pasting MKV URLs.
 
 ## Production Deployment
 
-### With Nginx (Recommended)
-
-1. Install Nginx
-2. Copy nginx.conf to your Nginx config directory
-3. Start services:
-
-```bash
-npm run build
-npm start
-npm run server
-nginx -c /path/to/nginx.conf
-```
-
-### Environment Variables
-
-Create `.env.local`:
-
-```
-SECRET_KEY=your-secure-secret-key-here
-TOKEN_EXPIRY=1h
-```
+Deployed on Render at: https://streamflix-qjhn.onrender.com
 
 ## Security Features
 
@@ -234,30 +143,7 @@ User → Frontend (Next.js) → Backend (Express) → External Media URL
 
 MIT
 
-## Available Commands
-
-| Command | Description |
-|---------|-------------|
-| `npm install` | Install all dependencies |
-| `npm run dev:all` | **Start both servers (recommended)** |
-| `npm run server` | Start backend only (port 3001) |
-| `npm run dev` | Start frontend only (port 3000) |
-| `npm run build` | Build for production |
-| `npm start` | Start production frontend |
-| `./start.sh` | Alternative start script |
-
 ## Documentation
 
-- [QUICKSTART.md](QUICKSTART.md) - Get started in 3 steps
 - [FEATURES.md](FEATURES.md) - Complete feature list and technical details
-- [USAGE.md](USAGE.md) - Comprehensive usage guide and troubleshooting
 - [PLAYER_DESIGN.md](PLAYER_DESIGN.md) - Netflix-style player design details
-- [INSTALL_FFMPEG.md](INSTALL_FFMPEG.md) - FFmpeg installation instructions
-
-## Quick Start Script
-
-```bash
-./start.sh
-```
-
-This starts both backend and frontend servers automatically.
