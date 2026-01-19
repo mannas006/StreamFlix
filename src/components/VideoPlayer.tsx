@@ -332,10 +332,11 @@ export default function VideoPlayer({ token, onBack }: VideoPlayerProps) {
   // Switch audio track
   const switchAudioTrack = useCallback((trackId: string) => {
     const video = videoRef.current;
-    if (!video || !video.audioTracks) return;
+    if (!video || !(video as any).audioTracks) return;
 
-    for (let i = 0; i < video.audioTracks.length; i++) {
-      const track = video.audioTracks[i];
+    const audioTracks = (video as any).audioTracks;
+    for (let i = 0; i < audioTracks.length; i++) {
+      const track = audioTracks[i];
       const shouldEnable = track.id === trackId || i.toString() === trackId;
       track.enabled = shouldEnable;
     }
@@ -455,10 +456,10 @@ export default function VideoPlayer({ token, onBack }: VideoPlayerProps) {
     setCurrentTime(time);
   }, []);
 
-  const handleSeekEnd = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleSeekEnd = useCallback((e: React.ChangeEvent<HTMLInputElement> | React.MouseEvent<HTMLInputElement> | React.TouchEvent<HTMLInputElement>) => {
     const video = videoRef.current;
     if (!video) return;
-    const time = parseFloat(e.target.value);
+    const time = parseFloat((e.target as HTMLInputElement).value);
     video.currentTime = time;
     setCurrentTime(time);
     setIsSeeking(false);
@@ -499,10 +500,11 @@ export default function VideoPlayer({ token, onBack }: VideoPlayerProps) {
       const tracks: AudioTrack[] = [];
       
       // Try native audioTracks API (Safari, Edge)
-      if (video.audioTracks && video.audioTracks.length > 0) {
-        console.log('Detected native audio tracks:', video.audioTracks.length);
-        for (let i = 0; i < video.audioTracks.length; i++) {
-          const track = video.audioTracks[i];
+      const videoAudioTracks = (video as any).audioTracks;
+      if (videoAudioTracks && videoAudioTracks.length > 0) {
+        console.log('Detected native audio tracks:', videoAudioTracks.length);
+        for (let i = 0; i < videoAudioTracks.length; i++) {
+          const track = videoAudioTracks[i];
           tracks.push({
             id: track.id || `audio-${i}`,
             label: track.label || `Audio Track ${i + 1}`,
@@ -663,9 +665,9 @@ export default function VideoPlayer({ token, onBack }: VideoPlayerProps) {
           console.log('Duration:', video?.duration, 'seconds');
           console.log('ReadyState:', video?.readyState);
           console.log('Video dimensions:', video?.videoWidth, 'x', video?.videoHeight);
-          console.log('Video tracks:', video?.videoTracks?.length);
-          console.log('Audio tracks:', video?.audioTracks?.length);
-          console.log('Has audio:', video?.mozHasAudio || video?.webkitAudioDecodedByteCount > 0 || Boolean(video?.audioTracks?.length));
+          console.log('Video tracks:', (video as any)?.videoTracks?.length);
+          console.log('Audio tracks:', (video as any)?.audioTracks?.length);
+          console.log('Has audio:', (video as any)?.mozHasAudio || (video as any)?.webkitAudioDecodedByteCount > 0 || Boolean((video as any)?.audioTracks?.length));
           console.log('===========================');
           
           // Force duration update
