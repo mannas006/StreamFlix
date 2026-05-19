@@ -8,6 +8,13 @@ interface AudioTrack {
   enabled: boolean;
 }
 
+interface SubtitleTrack {
+  id: string;
+  label: string;
+  language: string;
+  codec: string;
+}
+
 interface VideoPlayerProps {
   token: string;
   onBack: () => void;
@@ -19,7 +26,26 @@ export default function VideoPlayer({ token, onBack }: VideoPlayerProps) {
   const progressBarRef = useRef<HTMLDivElement>(null);
   const [isPlaying, setIsPlaying] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
-  const [duration, setDuration] = useState(0);
+  
+  // Decode JWT token payload on frontend safely
+  const decodedToken = (() => {
+    try {
+      const base64Url = token.split('.')[1];
+      const base64 = base64Url.replace(/-/g, '+').replace(/_/g, '/');
+      return JSON.parse(window.atob(base64));
+    } catch (e) {
+      return null;
+    }
+  })();
+
+  const isTranscoding = decodedToken?.transcode || false;
+  const [timeOffset, setTimeOffset] = useState(0);
+  const [activeAudioTrackId, setActiveAudioTrackId] = useState<string>(() => {
+    const active = decodedToken?.audioTracks?.find((t: any) => t.enabled);
+    return active ? active.id : '';
+  });
+
+  const [duration, setDuration] = useState<number>(() => decodedToken?.duration || 0);
   const [volume, setVolume] = useState(1);
   const [isMuted, setIsMuted] = useState(false);
   const [playbackRate, setPlaybackRate] = useState(1);
@@ -28,7 +54,9 @@ export default function VideoPlayer({ token, onBack }: VideoPlayerProps) {
   const [buffered, setBuffered] = useState(0);
   const [isSeeking, setIsSeeking] = useState(false);
   const [hoverTime, setHoverTime] = useState<number | null>(null);
-  const [audioTracks, setAudioTracks] = useState<AudioTrack[]>([]);
+  const [audioTracks, setAudioTracks] = useState<AudioTrack[]>(() => decodedToken?.audioTracks || []);
+  const [subtitleTracks, setSubtitleTracks] = useState<SubtitleTrack[]>(() => decodedToken?.subtitleTracks || []);
+  const [activeSubtitleTrackId, setActiveSubtitleTrackId] = useState<string>('off');
   const [showAudioMenu, setShowAudioMenu] = useState(false);
   const [showSkipAnimation, setShowSkipAnimation] = useState<'forward' | 'backward' | null>(null);
   const [isBuffering, setIsBuffering] = useState(false);
@@ -69,7 +97,7 @@ export default function VideoPlayer({ token, onBack }: VideoPlayerProps) {
 
     const updateProgress = () => {
       if (!isSeeking) {
-        setCurrentTime(video.currentTime);
+        setCurrentTime(isTranscoding ? timeOffset + video.currentTime : video.currentTime);
       }
       animationFrameId.current = requestAnimationFrame(updateProgress);
     };
@@ -83,7 +111,7 @@ export default function VideoPlayer({ token, onBack }: VideoPlayerProps) {
         cancelAnimationFrame(animationFrameId.current);
       }
     };
-  }, [isPlaying, isSeeking]);
+  }, [isPlaying, isSeeking, isTranscoding, timeOffset]);
 
   useEffect(() => {
     const video = videoRef.current;
@@ -93,6 +121,7 @@ export default function VideoPlayer({ token, onBack }: VideoPlayerProps) {
     video.volume = 1;
 
     const updateDuration = () => {
+      if (isTranscoding) return; // Always trust the backend ffprobe duration when transcoding
       const newDuration = video.duration;
       if (!isNaN(newDuration) && isFinite(newDuration) && newDuration > 0) {
         setDuration(prevDuration => {
@@ -149,6 +178,7 @@ export default function VideoPlayer({ token, onBack }: VideoPlayerProps) {
     };
     
     const handleTimeUpdate = () => {
+      if (isTranscoding) return; // Always trust the backend ffprobe duration when transcoding
       // Update duration during playback if it changes (for streaming)
       const newDuration = video.duration;
       if (!isNaN(newDuration) && isFinite(newDuration) && newDuration > 0) {
@@ -170,7 +200,7 @@ export default function VideoPlayer({ token, onBack }: VideoPlayerProps) {
     const handleProgress = () => {
       if (video.buffered.length > 0) {
         const bufferedEnd = video.buffered.end(video.buffered.length - 1);
-        setBuffered(bufferedEnd);
+        setBuffered(isTranscoding ? timeOffset + bufferedEnd : bufferedEnd);
       }
       // Try to update duration
       updateDuration();
@@ -329,19 +359,40 @@ export default function VideoPlayer({ token, onBack }: VideoPlayerProps) {
     }
   }, [isPlaying]);
 
+  // Custom seeking function for live transcoded streams
+  const handleSeekTo = useCallback((targetTime: number) => {
+    const video = videoRef.current;
+    if (!video) return;
+
+    console.log("Seeking to:", targetTime);
+    setTimeOffset(targetTime);
+    setCurrentTime(targetTime);
+    setIsBuffering(true);
+    setShowBuffering(true);
+
+    // Clean reset to prevent the browser from requesting previous range/buffers
+    video.pause();
+    video.removeAttribute('src');
+    video.load();
+
+    const newSrc = `${streamUrl}?ss=${targetTime}&audioStream=${activeAudioTrackId}&r=${Date.now()}`;
+    video.src = newSrc;
+    video.load();
+    video.play().catch(err => console.log("Play failed after seek:", err));
+    showControlsTemporarily();
+  }, [streamUrl, activeAudioTrackId, showControlsTemporarily]);
+
   // Switch audio track
   const switchAudioTrack = useCallback((trackId: string) => {
     const video = videoRef.current;
-    if (!video || !(video as any).audioTracks) return;
+    if (!video) return;
 
-    const audioTracks = (video as any).audioTracks;
-    for (let i = 0; i < audioTracks.length; i++) {
-      const track = audioTracks[i];
-      const shouldEnable = track.id === trackId || i.toString() === trackId;
-      track.enabled = shouldEnable;
-    }
-
-    // Update state
+    const currentPos = isTranscoding ? timeOffset + video.currentTime : video.currentTime;
+    
+    // Update active track ID
+    setActiveAudioTrackId(trackId);
+    
+    // Update state to reflect which track is enabled
     setAudioTracks(prev => prev.map(track => ({
       ...track,
       enabled: track.id === trackId
@@ -349,15 +400,83 @@ export default function VideoPlayer({ token, onBack }: VideoPlayerProps) {
     
     setShowAudioMenu(false);
     console.log('Switched to audio track:', trackId);
-  }, []);
+
+    // Force transcode stream starting at current position with selected audio
+    setTimeOffset(currentPos);
+    setCurrentTime(currentPos);
+    setIsBuffering(true);
+    setShowBuffering(true);
+
+    // Clean reset to prevent the browser from requesting previous range/buffers
+    video.pause();
+    video.removeAttribute('src');
+    video.load();
+
+    const newSrc = `${streamUrl}?ss=${currentPos}&audioStream=${trackId}&r=${Date.now()}`;
+    video.src = newSrc;
+    video.load();
+    video.play().catch(err => console.error("Play failed after audio track change:", err));
+  }, [streamUrl, isTranscoding, timeOffset]);
+
+  // Enable / disable subtitle tracks natively in the video element
+  useEffect(() => {
+    const video = videoRef.current;
+    if (!video) return;
+
+    const textTracks = video.textTracks;
+    if (!textTracks) return;
+
+    console.log('[player] Updating subtitle tracks visibility. Active:', activeSubtitleTrackId);
+    for (let i = 0; i < textTracks.length; i++) {
+      const track = textTracks[i];
+      // Match the text track label or index with our subtitle track config
+      const matchingTrack = subtitleTracks.find(t => t.label === track.label || track.language === t.language);
+      if (matchingTrack) {
+        if (matchingTrack.id === activeSubtitleTrackId) {
+          track.mode = 'showing';
+          console.log('[player] Subtitle track shown:', track.label);
+        } else {
+          track.mode = 'disabled';
+        }
+      } else {
+        // Fallback matching by index if label is empty
+        const trackIndexStr = i.toString();
+        if (activeSubtitleTrackId !== 'off' && activeSubtitleTrackId === trackIndexStr) {
+          track.mode = 'showing';
+        } else {
+          track.mode = 'disabled';
+        }
+      }
+    }
+  }, [activeSubtitleTrackId, subtitleTracks]);
+
+  // Toggle subtitles ON/OFF directly
+  const toggleSubtitlesOnOff = useCallback(() => {
+    if (subtitleTracks.length === 0) return;
+    
+    if (activeSubtitleTrackId === 'off') {
+      // Find default or first subtitle track
+      setActiveSubtitleTrackId(subtitleTracks[0].id);
+      console.log('[player] Subtitles toggled ON:', subtitleTracks[0].label);
+    } else {
+      setActiveSubtitleTrackId('off');
+      console.log('[player] Subtitles toggled OFF');
+    }
+  }, [activeSubtitleTrackId, subtitleTracks]);
 
   // Skip forward/backward
   const skip = useCallback((seconds: number) => {
     const video = videoRef.current;
     if (!video || !duration) return;
 
-    const newTime = Math.max(0, Math.min(duration, video.currentTime + seconds));
-    video.currentTime = newTime;
+    const currentPos = isTranscoding ? timeOffset + video.currentTime : video.currentTime;
+    const newTime = Math.max(0, Math.min(duration, currentPos + seconds));
+    
+    if (isTranscoding) {
+      handleSeekTo(newTime);
+    } else {
+      video.currentTime = newTime;
+    }
     
     // Show skip animation
     setShowSkipAnimation(seconds > 0 ? 'forward' : 'backward');
@@ -369,7 +488,7 @@ export default function VideoPlayer({ token, onBack }: VideoPlayerProps) {
     }, 500);
     
     showControlsTemporarily();
-  }, [duration, showControlsTemporarily]);
+  }, [duration, isTranscoding, timeOffset, handleSeekTo, showControlsTemporarily]);
 
   const skipForward = useCallback(() => skip(5), [skip]);
   const skipBackward = useCallback(() => skip(-5), [skip]);
@@ -460,10 +579,14 @@ export default function VideoPlayer({ token, onBack }: VideoPlayerProps) {
     const video = videoRef.current;
     if (!video) return;
     const time = parseFloat((e.target as HTMLInputElement).value);
-    video.currentTime = time;
-    setCurrentTime(time);
+    if (isTranscoding) {
+      handleSeekTo(time);
+    } else {
+      video.currentTime = time;
+      setCurrentTime(time);
+    }
     setIsSeeking(false);
-  }, []);
+  }, [isTranscoding, handleSeekTo]);
 
   const handleProgressBarClick = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
     const video = videoRef.current;
@@ -473,9 +596,13 @@ export default function VideoPlayer({ token, onBack }: VideoPlayerProps) {
     const rect = progressBar.getBoundingClientRect();
     const pos = (e.clientX - rect.left) / rect.width;
     const time = pos * duration;
-    video.currentTime = time;
-    setCurrentTime(time);
-  }, [duration]);
+    if (isTranscoding) {
+      handleSeekTo(time);
+    } else {
+      video.currentTime = time;
+      setCurrentTime(time);
+    }
+  }, [duration, isTranscoding, handleSeekTo]);
 
   const handleProgressBarHover = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
     const progressBar = progressBarRef.current;
@@ -493,6 +620,9 @@ export default function VideoPlayer({ token, onBack }: VideoPlayerProps) {
 
   // Detect and load audio tracks
   useEffect(() => {
+    // If we've already loaded them from the backend ffprobe metadata, don't run native detection
+    if (decodedToken?.audioTracks && decodedToken.audioTracks.length > 0) return;
+
     const video = videoRef.current;
     if (!video) return;
 
@@ -671,7 +801,7 @@ export default function VideoPlayer({ token, onBack }: VideoPlayerProps) {
           console.log('===========================');
           
           // Force duration update
-          if (video && video.duration && !isNaN(video.duration) && isFinite(video.duration)) {
+          if (!isTranscoding && video && video.duration && !isNaN(video.duration) && isFinite(video.duration)) {
             setDuration(video.duration);
           }
         }}
@@ -686,7 +816,18 @@ export default function VideoPlayer({ token, onBack }: VideoPlayerProps) {
           const video = videoRef.current;
           console.log('Volume:', video?.volume, 'Muted:', video?.muted);
         }}
-      />
+      >
+        {subtitleTracks.map(track => (
+          <track
+            key={track.id}
+            kind="subtitles"
+            src={`/api/subtitles/${token}/${track.id}`}
+            srcLang={track.language}
+            label={track.label}
+            default={track.id === activeSubtitleTrackId}
+          />
+        ))}
+      </video>
 
       {/* Netflix-style loading spinner */}
       {showBuffering && (
@@ -859,8 +1000,22 @@ export default function VideoPlayer({ token, onBack }: VideoPlayerProps) {
           </div>
 
           <div className={styles.rightControls}>
+            {/* Dedicated Subtitles CC On/Off Button */}
+            {subtitleTracks.length > 0 && (
+              <button 
+                onClick={toggleSubtitlesOnOff}
+                className={`${styles.audioButton} ${activeSubtitleTrackId !== 'off' ? styles.ccActive : ''}`}
+                title={activeSubtitleTrackId !== 'off' ? "Turn subtitles Off" : "Turn subtitles On"}
+                aria-label="Toggle subtitles"
+              >
+                <svg width="24" height="24" viewBox="0 0 24 24" fill={activeSubtitleTrackId !== 'off' ? '#e50914' : 'white'}>
+                  <path d="M19 4H5c-1.11 0-2 .9-2 2v12c0 1.1.89 2 2 2h14c1.1 0 2-.9 2-2V6c0-1.1-.9-2-2-2zm-8 7H9.5v-.5h-2v3h2V13H11v1c0 .55-.45 1-1 1H7c-.55 0-1-.45-1-1v-4c0-.55.45-1 1-1h3c.55 0 1 .45 1 1v1zm7 0h-1.5v-.5h-2v3h2V13H18v1c0 .55-.45 1-1 1h-3c-.55 0-1-.45-1-1v-4c0-.55.45-1 1-1h3c.55 0 1 .45 1 1v1z"/>
+                </svg>
+              </button>
+            )}
+
             {/* Audio & Subtitles button (only show if multiple tracks) */}
-            {audioTracks.length > 1 && (
+            {(audioTracks.length > 1 || subtitleTracks.length > 0) && (
               <div className={styles.audioMenuContainer}>
                 <button 
                   onClick={() => setShowAudioMenu(!showAudioMenu)}
@@ -875,27 +1030,74 @@ export default function VideoPlayer({ token, onBack }: VideoPlayerProps) {
                 {showAudioMenu && (
                   <div className={styles.audioMenu}>
                     <div className={styles.audioMenuHeader}>Audio & Subtitles</div>
-                    <div className={styles.audioMenuSection}>
-                      <div className={styles.audioMenuLabel}>Audio</div>
-                      {audioTracks.map(track => (
+                    
+                    {/* Audio track list */}
+                    {audioTracks.length > 1 && (
+                      <div className={styles.audioMenuSection}>
+                        <div className={styles.audioMenuLabel}>Audio</div>
+                        {audioTracks.map(track => (
+                          <button
+                            key={track.id}
+                            className={`${styles.audioMenuItem} ${track.enabled ? styles.active : ''}`}
+                            onClick={() => switchAudioTrack(track.id)}
+                          >
+                            <span>{track.label}</span>
+                            {track.enabled && (
+                              <svg width="20" height="20" viewBox="0 0 24 24" fill="white">
+                                <path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z"/>
+                              </svg>
+                            )}
+                          </button>
+                        ))}
+                      </div>
+                    )}
+
+                    {/* Subtitle track list */}
+                    {subtitleTracks.length > 0 && (
+                      <div className={styles.audioMenuSection}>
+                        <div className={styles.audioMenuLabel}>Subtitles</div>
+                        
+                        {/* Off option */}
                         <button
-                          key={track.id}
-                          className={`${styles.audioMenuItem} ${track.enabled ? styles.active : ''}`}
-                          onClick={() => switchAudioTrack(track.id)}
+                          className={`${styles.audioMenuItem} ${activeSubtitleTrackId === 'off' ? styles.active : ''}`}
+                          onClick={() => {
+                            setActiveSubtitleTrackId('off');
+                            setShowAudioMenu(false);
+                          }}
                         >
-                          <span>{track.label}</span>
-                          {track.enabled && (
+                          <span>Off</span>
+                          {activeSubtitleTrackId === 'off' && (
                             <svg width="20" height="20" viewBox="0 0 24 24" fill="white">
                               <path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z"/>
                             </svg>
                           )}
                         </button>
-                      ))}
-                    </div>
+
+                        {/* Available subtitle tracks */}
+                        {subtitleTracks.map(track => (
+                          <button
+                            key={track.id}
+                            className={`${styles.audioMenuItem} ${activeSubtitleTrackId === track.id ? styles.active : ''}`}
+                            onClick={() => {
+                              setActiveSubtitleTrackId(track.id);
+                              setShowAudioMenu(false);
+                            }}
+                          >
+                            <span>{track.label}</span>
+                            {activeSubtitleTrackId === track.id && (
+                              <svg width="20" height="20" viewBox="0 0 24 24" fill="white">
+                                <path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z"/>
+                              </svg>
+                            )}
+                          </button>
+                        ))}
+                      </div>
+                    )}
                   </div>
                 )}
               </div>
             )}
+
 
             <button 
               onClick={changePlaybackRate} 

@@ -507,6 +507,11 @@
   padding: 8px 0;
 }
 
+.audioMenuSection + .audioMenuSection {
+  border-top: 1px solid rgba(255, 255, 255, 0.1);
+  margin-top: 4px;
+}
+
 .audioMenuLabel {
   padding: 8px 16px;
   font-size: 12px;
@@ -541,6 +546,22 @@
 
 .audioMenuItem svg {
   flex-shrink: 0;
+}
+
+.ccActive {
+  color: #e50914 !important;
+  position: relative;
+}
+
+.ccActive::after {
+  content: '';
+  position: absolute;
+  bottom: 2px;
+  left: 25%;
+  width: 50%;
+  height: 3px;
+  background-color: #e50914;
+  border-radius: 2px;
 }
 
 /* Responsive design */

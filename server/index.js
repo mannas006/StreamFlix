@@ -36,33 +36,63 @@ app.use((req, res, next) => {
   next();
 });
 
-// Helper function to get video duration using FFmpeg
+// Helper function to get video metadata (duration and audio tracks) using FFmpeg/ffprobe
+const getVideoMetadata = async (url) => {
+  try {
+    const { stdout } = await execPromise(
+      `ffprobe -v error -show_entries format=duration:stream=index,codec_name,codec_type -show_entries stream_tags=language,title -of json "${url}"`
+    );
+    const data = JSON.parse(stdout);
+    const duration = parseFloat(data.format?.duration || 0);
+    
+    const audioTracks = (data.streams || [])
+      .filter(s => s.codec_type === 'audio')
+      .map((s, idx) => {
+        const lang = s.tags?.language || 'unknown';
+        const title = s.tags?.title || '';
+        return {
+          id: s.index.toString(),
+          label: title ? `${title} (${s.codec_name})` : `Audio Track ${idx + 1} (${lang} - ${s.codec_name})`,
+          language: lang,
+          enabled: idx === 0
+        };
+      });
+
+    const subtitleTracks = (data.streams || [])
+      .filter(s => s.codec_type === 'subtitle')
+      .map((s, idx) => {
+        const lang = s.tags?.language || 'unknown';
+        const title = s.tags?.title || '';
+        return {
+          id: s.index.toString(),
+          label: title ? `${title} (${s.codec_name})` : `Subtitle ${idx + 1} (${lang} - ${s.codec_name})`,
+          language: lang,
+          codec: s.codec_name
+        };
+      });
+
+    return {
+      duration: !isNaN(duration) && duration > 0 ? duration : null,
+      audioTracks,
+      subtitleTracks
+    };
+  } catch (err) {
+    console.error('ffprobe metadata extraction failed:', err.message);
+    return { duration: null, audioTracks: [], subtitleTracks: [] };
+  }
+};
+
 const getVideoDuration = async (url) => {
   try {
-    // Try using ffprobe command directly for better reliability
     const { stdout } = await execPromise(`ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "${url}"`);
     const duration = parseFloat(stdout.trim());
     if (!isNaN(duration) && duration > 0) {
-      console.log('✓ Video duration from ffprobe:', duration, 'seconds /', (duration / 60).toFixed(2), 'minutes');
       return duration;
     }
   } catch (cmdError) {
     console.log('⚠ ffprobe command failed:', cmdError.message);
   }
-
-  // Fallback to fluent-ffmpeg
-  return new Promise((resolve, reject) => {
-    ffmpeg.ffprobe(url, (err, metadata) => {
-      if (err) {
-        console.error('✗ FFprobe error:', err.message);
-        reject(err);
-      } else {
-        const duration = metadata.format.duration;
-        console.log('✓ Video duration from fluent-ffmpeg:', duration, 'seconds');
-        resolve(duration);
-      }
-    });
-  });
+  return null;
 };
 
 // Allowed MIME types for streaming
@@ -112,10 +142,21 @@ app.post('/api/generate-token', async (req, res) => {
       return res.status(400).json({ error: 'Unable to determine file type' });
     }
 
+    // Extract metadata
+    console.log('Probing video metadata...');
+    const metadata = await getVideoMetadata(url);
+    console.log(`Probing complete. Duration: ${metadata.duration}s, Audio Tracks: ${metadata.audioTracks.length}`);
+
     // Create token with 1 hour expiration
-    const token = jwt.sign({ url, transcode: transcode || false }, SECRET_KEY, { expiresIn: '1h' });
+    const token = jwt.sign({ 
+      url, 
+      transcode: transcode || false,
+      audioTracks: metadata.audioTracks,
+      subtitleTracks: metadata.subtitleTracks,
+      duration: metadata.duration
+    }, SECRET_KEY, { expiresIn: '1h' });
     
-    res.json({ token, streamUrl: `/api/stream/${token}` });
+    res.json({ token, streamUrl: `/api/stream/${token}`, metadata });
   } catch (error) {
     console.error('Validation error:', error.message);
     res.status(400).json({ 
@@ -203,18 +244,13 @@ app.get('/api/stream/:token', async (req, res) => {
     console.log('Transcode:', transcode);
     console.log('Range header:', range);
 
-    // Get video duration from metadata
-    let videoDuration = null;
-    try {
-      videoDuration = await getVideoDuration(url);
-      console.log('✓ Extracted video duration:', videoDuration, 'seconds');
-    } catch (err) {
-      console.log('⚠ Could not extract duration:', err.message);
-    }
+    const forceRaw = req.query.raw === 'true';
+    const ss = req.query.ss ? parseFloat(req.query.ss) : 0;
+    const audioStream = req.query.audioStream || '';
 
-    // If transcoding is enabled, use FFmpeg to convert on-the-fly
-    if (transcode) {
-      console.log('Starting FFmpeg transcoding...');
+    // If transcoding is enabled, or custom audio track is selected, transcode on-the-fly
+    if ((transcode || audioStream) && !forceRaw) {
+      console.log(`Starting FFmpeg transcoding from ss=${ss}, audioStream=${audioStream}`);
       
       res.writeHead(200, {
         'Content-Type': 'video/mp4',
@@ -224,21 +260,67 @@ app.get('/api/stream/:token', async (req, res) => {
         'Transfer-Encoding': 'chunked'
       });
 
-      // FFmpeg command to transcode audio to AAC, copy video
-      const ffmpegProcess = spawn('ffmpeg', [
-        '-i', url,
-        '-c:v', 'copy',           // Copy video without re-encoding
-        '-c:a', 'aac',            // Convert audio to AAC
-        '-b:a', '192k',           // Audio bitrate
-        '-movflags', 'frag_keyframe+empty_moov+faststart', // Enable streaming
-        '-f', 'mp4',              // Output format
-        'pipe:1'                  // Output to stdout
-      ]);
+      const ffmpegArgs = [];
+      
+      // Regenerate presentation timestamps if missing or broken in source stream
+      ffmpegArgs.push('-fflags', '+genpts');
+
+      if (ss > 0) {
+        ffmpegArgs.push('-ss', ss.toString());
+      }
+      ffmpegArgs.push('-i', url);
+
+      if (audioStream) {
+        ffmpegArgs.push('-map', '0:v:0', '-map', `0:${audioStream}`);
+      } else {
+        ffmpegArgs.push('-map', '0:v:0', '-map', '0:a:0?');
+      }
+
+      // Choose optimal video codec:
+      // When seeking (ss > 0), transcoding the video guarantees frame-accurate, perfect audio-video synchronization.
+      // On macOS (Apple Silicon), we use the hardware videotoolbox encoder which is extremely fast and uses 0% CPU.
+      let videoCodec = 'copy';
+      const codecArgs = [];
+
+      if (ss > 0) {
+        if (process.platform === 'darwin') {
+          console.log('[backend] Using hardware h264_videotoolbox for seek sync');
+          videoCodec = 'h264_videotoolbox';
+          codecArgs.push(
+            '-b:v', '4000k',
+            '-maxrate', '6000k',
+            '-bufsize', '12000k',
+            '-pix_fmt', 'yuv420p'
+          );
+        } else {
+          console.log('[backend] Using software libx264 ultrafast for seek sync');
+          videoCodec = 'libx264';
+          codecArgs.push(
+            '-preset', 'ultrafast',
+            '-tune', 'zerolatency',
+            '-pix_fmt', 'yuv420p'
+          );
+        }
+      }
+
+      ffmpegArgs.push(
+        '-c:v', videoCodec,
+        ...codecArgs,
+        '-c:a', 'aac',
+        '-b:a', '192k',
+        '-af', 'aresample=async=1',               // Dynamically sync/stretch audio samples to match video frames
+        '-avoid_negative_ts', 'make_zero',        // Shift stream presentation timestamps to start at 0
+        '-movflags', 'frag_keyframe+empty_moov+faststart',
+        '-f', 'mp4',
+        'pipe:1'
+      );
+
+      const ffmpegProcess = spawn('ffmpeg', ffmpegArgs);
 
       ffmpegProcess.stdout.pipe(res);
 
       ffmpegProcess.stderr.on('data', (data) => {
-        console.log('FFmpeg:', data.toString());
+        // Suppress FFmpeg noise, only log errors if critical
       });
 
       ffmpegProcess.on('error', (err) => {
@@ -369,6 +451,58 @@ app.get('/api/stream/:token', async (req, res) => {
     console.error('Streaming error:', error.message);
     if (!res.headersSent) {
       res.status(500).json({ error: 'Failed to stream media' });
+    }
+  }
+});
+
+// Real-time subtitle extraction endpoint (WebVTT format)
+app.get('/api/subtitles/:token/:trackId', async (req, res) => {
+  try {
+    const { token, trackId } = req.params;
+    
+    // Verify token
+    let decoded;
+    try {
+      decoded = jwt.verify(token, SECRET_KEY);
+    } catch (err) {
+      console.error('Subtitles: Token verification failed:', err.message);
+      return res.status(401).json({ error: 'Invalid or expired token' });
+    }
+
+    const { url } = decoded;
+    console.log(`[backend] Extracting subtitle stream ${trackId} to WebVTT for:`, url);
+
+    res.writeHead(200, {
+      'Content-Type': 'text/vtt; charset=utf-8',
+      'Access-Control-Allow-Origin': '*',
+      'Cache-Control': 'no-cache'
+    });
+
+    // Spawn FFmpeg to extract subtitles and convert to WebVTT format on-the-fly
+    const ffmpegProcess = spawn('ffmpeg', [
+      '-i', url,
+      '-map', `0:${trackId}`,
+      '-f', 'webvtt',
+      'pipe:1'
+    ]);
+
+    ffmpegProcess.stdout.pipe(res);
+
+    ffmpegProcess.stderr.on('data', (data) => {
+      // Suppress FFmpeg output
+    });
+
+    ffmpegProcess.on('error', (err) => {
+      console.error('Subtitle FFmpeg process error:', err);
+    });
+
+    req.on('close', () => {
+      ffmpegProcess.kill('SIGKILL');
+    });
+  } catch (error) {
+    console.error('Subtitle API error:', error.message);
+    if (!res.headersSent) {
+      res.status(500).json({ error: 'Failed to retrieve subtitles' });
     }
   }
 });
